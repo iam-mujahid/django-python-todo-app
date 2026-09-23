@@ -1,64 +1,106 @@
 pipeline {
-    
-    agent any 
-    
+
+    agent any
+
     environment {
-        IMAGE_TAG = "${BUILD_NUMBER}"
+        IMAGE_NAME = "mujahidhub/django-python-todo-app"
+        IMAGE_TAG  = "${BUILD_NUMBER}"
     }
-    
+
     stages {
-        
-        stage('Checkout'){
-           steps {
-                git credentialsId: 'f87a34a8-0e09-45e7-b9cf-6dc68feac670', 
-                url: 'https://github.com/iam-veeramalla/cicd-end-to-end',
-                branch: 'main'
-           }
+
+        stage('Checkout Application') {
+            steps {
+                git(
+                    credentialsId: 'github-credentials',
+                    url: 'https://github.com/iam-mujahid/django-python-todo-app.git',
+                    branch: 'main'
+                )
+            }
         }
 
-        stage('Build Docker'){
-            steps{
-                script{
+        stage('Build Docker Image') {
+            steps {
+                sh '''
+                    echo "Building Docker image..."
+                    docker build -t ${IMAGE_NAME}:${IMAGE_TAG} .
+                '''
+            }
+        }
+
+        stage('Push Docker Image to Registry') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'dockerhub-credentials',
+                        usernameVariable: 'DOCKER_USERNAME',
+                        passwordVariable: 'DOCKER_PASSWORD'
+                    )
+                ]) {
                     sh '''
-                    echo 'Buid Docker Image'
-                    docker build -t abhishekf5/cicd-e2e:${BUILD_NUMBER} .
+                        echo "Logging in to Docker Hub..."
+                        echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+
+                        echo "Pushing Docker image..."
+                        docker push ${IMAGE_NAME}:${IMAGE_TAG}
+
+                        docker logout
                     '''
                 }
             }
         }
 
-        stage('Push the artifacts'){
-           steps{
-                script{
+        stage('Checkout GitOps Repository') {
+            steps {
+                dir('gitops') {
+                    git(
+                        credentialsId: 'github-credentials',
+                        url: 'https://github.com/iam-mujahid/django-python-todo-deploy-manifests.git',
+                        branch: 'main'
+                    )
+                }
+            }
+        }
+
+        stage('Update Kubernetes Manifest') {
+            steps {
+                dir('gitops') {
                     sh '''
-                    echo 'Push to Repo'
-                    docker push abhishekf5/cicd-e2e:${BUILD_NUMBER}
+                        echo "Current deployment image:"
+                        grep "image:" deploy.yaml
+
+                        echo "Updating image to:"
+                        echo "${IMAGE_NAME}:${IMAGE_TAG}"
+
+                        sed -i "s|image:.*|image: ${IMAGE_NAME}:${IMAGE_TAG}|" deploy.yaml
+
+                        echo "Updated deployment image:"
+                        grep "image:" deploy.yaml
                     '''
                 }
             }
         }
-        
-        stage('Checkout K8S manifest SCM'){
+
+        stage('Commit and Push GitOps Changes') {
             steps {
-                git credentialsId: 'f87a34a8-0e09-45e7-b9cf-6dc68feac670', 
-                url: 'https://github.com/iam-veeramalla/cicd-demo-manifests-repo.git',
-                branch: 'main'
-            }
-        }
-        
-        stage('Update K8S manifest & push to Repo'){
-            steps {
-                script{
-                    withCredentials([usernamePassword(credentialsId: 'f87a34a8-0e09-45e7-b9cf-6dc68feac670', passwordVariable: 'GIT_PASSWORD', usernameVariable: 'GIT_USERNAME')]) {
+                dir('gitops') {
+                    withCredentials([
+                        usernamePassword(
+                            credentialsId: 'github-credentials',
+                            usernameVariable: 'GIT_USERNAME',
+                            passwordVariable: 'GIT_PASSWORD'
+                        )
+                    ]) {
                         sh '''
-                        cat deploy.yaml
-                        sed -i '' "s/32/${BUILD_NUMBER}/g" deploy.yaml
-                        cat deploy.yaml
-                        git add deploy.yaml
-                        git commit -m 'Updated the deploy yaml | Jenkins Pipeline'
-                        git remote -v
-                        git push https://github.com/iam-veeramalla/cicd-demo-manifests-repo.git HEAD:main
-                        '''                        
+                            git config user.name "Jenkins"
+                            git config user.email "jenkins@localhost"
+
+                            git add deploy.yaml
+
+                            git commit -m "Update Django Todo image to ${IMAGE_TAG}" || echo "No changes to commit"
+
+                            git push https://${GIT_USERNAME}:${GIT_PASSWORD}@github.com/iam-mujahid/django-python-todo-deploy-manifests.git HEAD:main
+                        '''
                     }
                 }
             }
